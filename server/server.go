@@ -15,13 +15,11 @@
 package server
 
 import (
-	"time"
-
-	"github.com/dolthub/vitess/go/mysql"
-	"github.com/opentracing/opentracing-go"
-
 	sqle "github.com/dolthub/go-mysql-server"
 	"github.com/dolthub/go-mysql-server/auth"
+	"github.com/dolthub/vitess/go/mysql"
+	"github.com/opentracing/opentracing-go"
+	"github.com/sirupsen/logrus"
 )
 
 // Server is a MySQL server for SQLe engines.
@@ -32,10 +30,6 @@ type Server struct {
 
 // Config for the mysql server.
 type Config struct {
-	// Protocol for the connection.
-	Protocol string
-	// Address of the server.
-	Address string
 	// Auth of the server.
 	Auth auth.Auth
 	// Tracer to use in the server. By default, a noop tracer will be used if
@@ -43,12 +37,8 @@ type Config struct {
 	Tracer opentracing.Tracer
 	// Version string to advertise in running server
 	Version string
-	// ConnReadTimeout is the server's read timeout
-	ConnReadTimeout time.Duration
-	// ConnWriteTimeout is the server's write timeout
-	ConnWriteTimeout time.Duration
-	// MaxConnections is the maximum number of simultaneous connections that the server will allow.
-	MaxConnections uint64
+	// Logger is the logger to use, otherwise uses stderr.
+	Logger *logrus.Entry
 }
 
 // NewDefaultServer creates a Server with the default session builder.
@@ -66,42 +56,28 @@ func NewServer(cfg Config, e *sqle.Engine, sb SessionBuilder) (*Server, error) {
 		tracer = opentracing.NoopTracer{}
 	}
 
-	if cfg.ConnReadTimeout < 0 {
-		cfg.ConnReadTimeout = 0
-	}
+	le := buildDefaultLogger(cfg.Logger)
 
-	if cfg.ConnWriteTimeout < 0 {
-		cfg.ConnWriteTimeout = 0
-	}
-
-	if cfg.MaxConnections < 0 {
-		cfg.MaxConnections = 0
-	}
-
-	handler := NewHandler(e,
+	serverAddr := "127.0.0.1" // placeholder
+	handler := NewHandler(
+		le,
+		e,
 		NewSessionManager(
 			sb,
 			tracer,
 			e.Catalog.HasDB,
 			e.Catalog.MemoryManager,
-			cfg.Address),
-		cfg.ConnReadTimeout)
-	a := cfg.Auth.Mysql()
-	l, err := NewListener(cfg.Protocol, cfg.Address, handler)
-	if err != nil {
-		return nil, err
+			serverAddr,
+		),
+	)
+	var a mysql.AuthServer
+	if cfg.Auth != nil {
+		a = cfg.Auth.Mysql()
 	}
-
-	listenerCfg := mysql.ListenerConfig{
-		Listener:           l,
-		AuthServer:         a,
-		Handler:            handler,
-		ConnReadTimeout:    cfg.ConnReadTimeout,
-		ConnWriteTimeout:   cfg.ConnWriteTimeout,
-		MaxConns:           cfg.MaxConnections,
-		ConnReadBufferSize: mysql.DefaultConnBufferSize,
+	if a == nil {
+		a = (&auth.None{}).Mysql()
 	}
-	vtListnr, err := mysql.NewListenerWithConfig(listenerCfg)
+	vtListnr, err := mysql.NewListener(a, handler)
 	if err != nil {
 		return nil, err
 	}
@@ -111,16 +87,4 @@ func NewServer(cfg Config, e *sqle.Engine, sb SessionBuilder) (*Server, error) {
 	}
 
 	return &Server{Listener: vtListnr, h: handler}, nil
-}
-
-// Start starts accepting connections on the server.
-func (s *Server) Start() error {
-	s.Listener.Accept()
-	return nil
-}
-
-// Close closes the server connection.
-func (s *Server) Close() error {
-	s.Listener.Close()
-	return nil
 }

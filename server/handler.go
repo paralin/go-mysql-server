@@ -59,24 +59,24 @@ const tcpCheckerSleepTime = 1
 
 // Handler is a connection handler for a SQLe engine.
 type Handler struct {
-	mu          sync.Mutex
-	e           *sqle.Engine
-	sm          *SessionManager
-	readTimeout time.Duration
+	le *logrus.Entry
+	mu sync.Mutex
+	e  *sqle.Engine
+	sm *SessionManager
 }
 
 // NewHandler creates a new Handler given a SQLe engine.
-func NewHandler(e *sqle.Engine, sm *SessionManager, rt time.Duration) *Handler {
+func NewHandler(le *logrus.Entry, e *sqle.Engine, sm *SessionManager) *Handler {
 	return &Handler{
-		e:           e,
-		sm:          sm,
-		readTimeout: rt,
+		le: le,
+		e:  e,
+		sm: sm,
 	}
 }
 
 // NewConnection reports that a new connection has been established.
 func (h *Handler) NewConnection(c *mysql.Conn) {
-	logrus.Infof("NewConnection: client %v", c.ConnectionID)
+	h.le.Infof("NewConnection: client %v", c.ConnectionID)
 }
 
 func (h *Handler) ComInitDB(c *mysql.Conn, schemaName string) error {
@@ -111,10 +111,10 @@ func (h *Handler) ConnectionClosed(c *mysql.Conn) {
 	// If connection was closed, kill its associated queries.
 	h.e.Catalog.ProcessList.Kill(c.ConnectionID)
 	if err := h.e.Catalog.UnlockTables(ctx, c.ConnectionID); err != nil {
-		logrus.Errorf("unable to unlock tables on session close: %s", err)
+		h.le.Errorf("unable to unlock tables on session close: %s", err)
 	}
 
-	logrus.Infof("ConnectionClosed: client %v", c.ConnectionID)
+	h.le.Infof("ConnectionClosed: client %v", c.ConnectionID)
 }
 
 // ComQuery executes a SQL query on the SQLe engine.
@@ -326,9 +326,6 @@ func (h *Handler) doQuery(
 	// call Handler.CloseConnection()
 	waitTime := 1 * time.Minute
 
-	if h.readTimeout > 0 {
-		waitTime = h.readTimeout
-	}
 	timer := time.NewTimer(waitTime)
 	defer timer.Stop()
 
@@ -396,12 +393,9 @@ rowLoop:
 			r.Rows = append(r.Rows, outputRow)
 			r.RowsAffected++
 		case <-timer.C:
-			if h.readTimeout != 0 {
-				// Cancel and return so Vitess can call the CloseConnection callback
-				logrus.Tracef("connection %d got timeout", c.ConnectionID)
-				close(quit)
-				return ErrRowTimeout.New()
-			}
+			// Cancel and return so Vitess can call the CloseConnection callback
+			close(quit)
+			return ErrRowTimeout.New()
 		}
 		timer.Reset(waitTime)
 	}
@@ -550,7 +544,7 @@ func (h *Handler) pollForClosedConnection(c *mysql.Conn, errChan chan error, qui
 			errChan <- ErrConnectionWasClosed.New()
 			return
 		case sockstate.Error:
-			logrus.Infof("Connection checker exiting, got err checking sockstate: %v", err)
+			h.le.Infof("Connection checker exiting, got err checking sockstate: %v", err)
 			return
 		default: // Established
 			// (juanjux) this check is not free, each iteration takes about 9 milliseconds to run on my machine
@@ -628,7 +622,7 @@ func (h *Handler) handleKill(conn *mysql.Conn, query string) (bool, error) {
 	connID := uint32(id)
 	h.e.Catalog.Kill(connID)
 	if s[1] != "query" {
-		logrus.Infof("kill connection: id %d", connID)
+		h.le.Infof("kill connection: id %d", connID)
 		h.sm.CloseConn(conn)
 		conn.Close()
 	}
